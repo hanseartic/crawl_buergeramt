@@ -6,8 +6,20 @@ import time
 import logging
 
 
-class ProxyManager(object):
+class BaseProxyManager(object):
+    def __init__(self):
+        self.locked = False
+
+    def renew_connection(self):
+        pass
+
+    def is_renewing(self):
+        return self.locked
+
+
+class TorProxyManager(BaseProxyManager):
     def __init__(self, tor_mgmt_port=9051, tor_mgmt_password=''):
+        super().__init__()
         self.direct_socket = socket.socket
         self.proxied_socket = None
         self.tor_mgmt_port = tor_mgmt_port
@@ -32,6 +44,7 @@ class ProxyManager(object):
         return True
 
     def renew_connection(self):
+        self.locked = True
         logging.debug('Renewing tor-IP address')
         # to reach the TOR instance we need to disable the proxy
         previous_proxy_state = self.disable_proxy()
@@ -53,3 +66,4 @@ class ProxyManager(object):
             self.enable_proxy()
         # print our new ip address
         logging.info('New IP: {}'.format(requests.get('http://ipinfo.io/ip').text.replace('\n', '')))
+        self.locked = False
