@@ -1,20 +1,19 @@
 import socket
 import socks
 import requests
+from requests.exceptions import ReadTimeout
 from stem import connection, Signal
 import time
+import threading
 import logging
 
 
 class BaseProxyManager(object):
     def __init__(self):
-        self.locked = False
+        self.lock = threading.RLock()
 
     def renew_connection(self):
         pass
-
-    def is_renewing(self):
-        return self.locked
 
 
 class TorProxyManager(BaseProxyManager):
@@ -44,8 +43,8 @@ class TorProxyManager(BaseProxyManager):
         return True
 
     def renew_connection(self):
-        self.locked = True
         logging.debug('Renewing tor-IP address')
+        self.lock.acquire()
         # to reach the TOR instance we need to disable the proxy
         previous_proxy_state = self.disable_proxy()
 
@@ -64,6 +63,11 @@ class TorProxyManager(BaseProxyManager):
                 )
             )
             self.enable_proxy()
+            self.lock.release()
         # print our new ip address
-        logging.info('New IP: {}'.format(requests.get('http://ipinfo.io/ip').text.replace('\n', '')))
-        self.locked = False
+        try:
+            logging.info('ip-address renewed: {}'.format(
+                requests.get('http://ipinfo.io/ip', timeout=2).text.replace('\n', ''))
+            )
+        except ReadTimeout:
+            logging.info('ip-address renewed.')
