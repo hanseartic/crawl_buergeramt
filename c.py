@@ -3,6 +3,8 @@ import sys
 import argparse
 import time
 import logging
+from threading import Thread
+
 import json_log_filter
 from Crawlers import Crawler
 from ProxyManager import TorProxyManager, BaseProxyManager
@@ -34,6 +36,10 @@ param_request = [  # anliegen
     #   '121637',  # Neuerteilung Führerschein nach Entzug
     #   '121593',  # Ersatzführerschein nach Verlust
 ]
+
+
+crawlers = {}
+run = True
 
 
 def get_date(start_date):
@@ -85,18 +91,9 @@ def main(args):
 
     crawler.set_selector("td[class~='{}']>a".format(CSS_CLASS_RESERVABLE))
 
-    while True:
+    while run:
         ct = crawler.crawl(URL_CALENDAR)
-        try:
-            ct.join()
-        except KeyboardInterrupt as ki:
-            dispatcher.send(Crawler.SIGNAL_TERMINATE)
-            del crawler
-            ct.join()
-
-            raise ki
-            break
-    exit(0)
+        ct.join()
 
 
 def on_crawler_progress():
@@ -127,6 +124,8 @@ def on_crawler_terminated(*args):
 def calendar_callback(detail_link):
     with Crawler(worker_count=10, name='Details Crawler',
                  worker_callback=reserve_appointment) as details_crawler:
+
+        logging.debug('callback received detail-link')
         details_crawler.set_timeout(15)
         details_crawler.set_selector("td[class~='{}']>a".format(CSS_CLASS_FREE_APPOINTMENT))
         details_crawler.add_header(
@@ -167,4 +166,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print(" caught. all abort")
         dispatcher.send(Crawler.SIGNAL_TERMINATE)
+        run = False
         wait_exit(1)

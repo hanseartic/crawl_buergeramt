@@ -23,6 +23,7 @@ class Crawler(object):
         self.headers = {'User-Agent': 'PyPoeci'}
         self.css_selector = 'a'  # find all links - most probably too general
         self.connection_timeout = 30
+        self.workers = []
 
         self.lock = threading.RLock()
         self.queue = Queue()
@@ -37,6 +38,12 @@ class Crawler(object):
         self.name = name
 
         self.start_workers(worker_count=worker_count, worker=self.parse, worker_args=[worker_callback])
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop_workers()
 
     def __del__(self):
         self.abort_workers()
@@ -59,8 +66,6 @@ class Crawler(object):
         logging.debug('Received TERMINATE signal. Preparing shutdown.')
         self.abort_workers()
 
-    workers = []
-
     def abort_workers(self):
         try:
             while True:
@@ -76,39 +81,47 @@ class Crawler(object):
             self.stop_workers()
 
     def stop_workers(self):
-        for i in range(len(self.workers)):
-            logging.debug('Sending stop-signal to worker [{}]'.format(i))
-            self.queue.put(None)
-        for worker in self.workers:
-            worker.join()
-            logging.debug('Worker [{}] stopped.'.format(worker.name))
-        self.workers.clear()
+        with self.lock:
+            for i in range(len(self.workers)):
+                logging.debug('Sending stop-signal to worker [{}]'.format(i))
+                self.queue.put(None)
+            for worker in self.workers:
+                worker.join()
+                logging.debug('Worker [{}] stopped.'.format(worker.name))
+            self.workers.clear()
         return True
 
     def start_workers(self, worker_count: int, worker: callable, worker_args=None):
+        w = tuple(worker_args)
         for i in range(worker_count):
             worker_name = 'Worker {}'.format(i)
             logging.debug('Starting worker [{}]'.format(worker_name))
-            t = threading.Thread(target=worker, args=worker_args, name=worker_name)
+            t = threading.Thread(target=worker, args=w+(worker_name,), name=worker_name)
             t.start()
             self.workers.append(t)
 
-    def parse(self, callback: callable):
+    def parse(self, callback: callable, worker_name=''):
         while True:
             try:
+                logging.debug('{} waiting for work in queue'.format(worker_name))
                 link = self.queue.get()
+                logging.debug('{} got work from queue'.format(worker_name))
                 if link is None:
+                    logging.debug('{}: no more jobs - going home'.format(worker_name))
                     break
-
-                link_target = link.attrib['href']
-                with self.lock:
-                    logging.debug('{}'.format(link_target))
+                logging.info('{}: Processing link'.format(worker_name))
+                if hasattr(link, 'href'):
+                    link_target = link.attrib['href']
+                else:
+                    link_target = link
+                logging.debug('{}'.format(link_target))
                 if hasattr(callback, 'crawl'):
                     callback.crawl(link_target)
                 else:
                     callback(link_target)
             finally:
                 self.queue.task_done()
+        logging.debug('{}: bye'.format(worker_name))
 
     def crawl(self, url):
         crawl_thread = threading.Thread(target=self._main_crawler, args=[url])
@@ -133,8 +146,7 @@ class Crawler(object):
                 html = response.text
                 tree = lhtml.fromstring(html)
                 links_to_follow = tree.cssselect(self.css_selector)
-                # "td[class~='{}']>a".format(self.CSS_CLASS_RESERVABLE))
-                if len(links_to_follow) > 0:
+                if len(links_to_follow) > 0 and len(self.workers) > 0:
                     logging.info('Found {} links. Queueing for work'.format(len(links_to_follow)))
                     for link in links_to_follow:
                         self.queue.put(link)
