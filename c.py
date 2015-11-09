@@ -37,7 +37,7 @@ param_request = [  # anliegen
     #   '121593',  # Ersatzführerschein nach Verlust
 ]
 
-
+crawl_threads = []
 crawlers = {}
 run = True
 
@@ -49,7 +49,7 @@ def get_date(start_date):
         return int(time.time())
 
 
-pm = BaseProxyManager()
+pm = None
 
 
 def main(args):
@@ -73,27 +73,60 @@ def main(args):
         pm = TorProxyManager(9051, 'test')
         pm.enable_proxy()
 
-    dispatcher.connect(receiver=on_crawler_progress, signal=Crawler.SIGNAL_PROGRESS)
-    dispatcher.connect(receiver=on_crawler_stressed, signal=Crawler.SIGNAL_TOO_MANY_REQUESTS)
-    dispatcher.connect(receiver=on_crawler_timeout, signal=Crawler.SIGNAL_TIMEOUT)
-    dispatcher.connect(receiver=on_crawler_terminated, signal=Crawler.SIGNAL_TERMINATED)
+    dispatcher.connect(receiver=on_crawl_started, signal=Crawler.SIGNAL_OUT_CRAWL_STARTED)
+    dispatcher.connect(receiver=on_crawler_progress, signal=Crawler.SIGNAL_OUT_PROGRESS)
+    dispatcher.connect(receiver=on_crawler_stressed, signal=Crawler.SIGNAL_OUT_TOO_MANY_REQUESTS)
+    dispatcher.connect(receiver=on_crawler_timeout, signal=Crawler.SIGNAL_OUT_TIMEOUT)
+    dispatcher.connect(receiver=on_crawler_terminated, signal=Crawler.SIGNAL_OUT_TERMINATED)
+    dispatcher.connect(receiver=on_crawler_match, signal=Crawler.SIGNAL_OUT_MATCH_FOUND)
 
-    crawler = Crawler(worker_count=5, name='Calendar crawler', worker_callback=calendar_callback)
-    crawler.add_header(
+    form_crawler = Crawler(worker_count=1, name='Form Filter')
+    form_crawler\
+        .set_timeout(5)\
+        .set_selector('#kundendaten form')\
+        .add_header(
+            'User-Agent',
+            'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/46.0.2490.80 Safari/537.36'
+        )
+
+    details_crawler = Crawler(worker_count=8, name='Details Crawler', worker_callback=form_crawler)
+    details_crawler.set_timeout(15)
+    details_crawler.set_selector('.navigation a')
+    details_crawler.set_selector("td[class~='{}']>a".format(CSS_CLASS_FREE_APPOINTMENT))
+    details_crawler.add_header(
         'User-Agent',
         'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/46.0.2490.80 Safari/537.36'
     )
-    crawler.set_timeout(10)
-    crawler.add_param('Datum', get_date(arguments.start_date))
-    crawler.add_param('termin', 1)
-    crawler.add_param('dienstleister', param_service_ids)
-    crawler.add_param('anliegen', param_request)
 
-    crawler.set_selector("td[class~='{}']>a".format(CSS_CLASS_RESERVABLE))
+    #calendar_crawler = Crawler(worker_count=4, name='Calendar crawler', worker_callback=calendar_callback)
+    calendar_crawler = Crawler(worker_count=4, name='Calendar crawler', worker_callback=details_crawler)
+    calendar_crawler.add_header(
+        'User-Agent',
+        'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/46.0.2490.80 Safari/537.36'
+    )
+    calendar_crawler.set_timeout(10)
+    calendar_crawler.add_param('Datum', get_date(arguments.start_date))
+    calendar_crawler.add_param('termin', 1)
+    calendar_crawler.add_param('dienstleister', param_service_ids)
+    calendar_crawler.add_param('anliegen', param_request)
+
+    calendar_crawler.set_selector(".indexlist_item a")
+    calendar_crawler.set_selector("td[class~='{}']>a".format(CSS_CLASS_RESERVABLE))
 
     while run:
-        ct = crawler.crawl(URL_CALENDAR)
+        ct = calendar_crawler.crawl(URL_CALENDAR)
         ct.join()
+
+    for thread in crawl_threads:
+        thread.join()
+        crawl_threads.remove(thread)
+
+    logging.debug("END")
+    sys.exit(0)
+
+
+def on_crawl_started(sender):
+    crawl_threads.append(sender)
 
 
 def on_crawler_progress():
@@ -103,7 +136,8 @@ def on_crawler_progress():
 def on_crawler_stressed(sender: Crawler, url: str):
     print('8', end='\n', flush=True)
     with sender.lock:
-        pm.renew_connection()
+        if pm:
+            pm.renew_connection()
     if sender.name == 'Details Crawler':
         sender.crawl(url).join()
 
@@ -111,7 +145,8 @@ def on_crawler_stressed(sender: Crawler, url: str):
 def on_crawler_timeout(sender: Crawler, url: str):
     print('T', end='', flush=True)
     with sender.lock:
-        pm.renew_connection()
+        if pm:
+            pm.renew_connection()
 
 
 def on_crawler_terminated(*args):
@@ -119,6 +154,16 @@ def on_crawler_terminated(*args):
     crawler_count -= 1
     if crawler_count <= 0:
         cr = False
+
+
+def on_crawler_match(sender: Crawler, match, source_url):
+    logging.debug('[{}]: {}'.format(sender.name, match))
+    if sender.name == 'Calendar crawler':
+        pass
+    elif sender.name == 'Details crawler':
+        pass
+    else:
+        pass
 
 
 def calendar_callback(detail_link):
@@ -164,7 +209,7 @@ if __name__ == "__main__":
     try:
         main(sys.argv[1:])
     except KeyboardInterrupt:
-        print(" caught. all abort")
-        dispatcher.send(Crawler.SIGNAL_TERMINATE)
         run = False
-        wait_exit(1)
+        print(" caught. all abort")
+        dispatcher.send(Crawler.SIGNAL_IN_TERMINATE)
+        wait_exit(0)

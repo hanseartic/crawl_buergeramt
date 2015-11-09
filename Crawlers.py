@@ -1,6 +1,6 @@
 import logging
 from queue import Queue, Empty
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 import requests
 import lxml.html as lhtml
 import threading
@@ -9,15 +9,17 @@ from pydispatch import dispatcher
 
 
 class Crawler(object):
+    SIGNAL_OUT_CRAWL_STARTED = 'crawler.crawl_started'
+    SIGNAL_OUT_FINISHED = 'crawler.finished'
+    SIGNAL_OUT_MATCH_FOUND = 'crawler.match_found'
+    SIGNAL_OUT_PROGRESS = 'crawler.progress'
+    SIGNAL_IN_TERMINATE = 'crawler.terminate'
+    SIGNAL_OUT_TERMINATED = 'crawler.terminated'
+    SIGNAL_OUT_TIMEOUT = 'crawler.connection_timeout'
+    SIGNAL_OUT_TOO_MANY_REQUESTS = 'crawler.too_many_requests'
 
-    SIGNAL_PROGRESS = 'crawler.progress'
-    SIGNAL_TOO_MANY_REQUESTS = 'crawler.too_many_requests'
-    SIGNAL_TIMEOUT = 'crawler.connection_timeout'
-    SIGNAL_TERMINATE = 'crawler.terminate'
-    SIGNAL_TERMINATED = 'crawler.terminated'
-
-    def __init__(self, worker_count=1, name='Crawler', worker_callback: callable = None):
-        dispatcher.connect(self._abort, signal=self.SIGNAL_TERMINATE)
+    def __init__(self, worker_count=1, name='Crawler', worker_callback: callable = lambda _: ""):
+        dispatcher.connect(self._abort, signal=self.SIGNAL_IN_TERMINATE)
 
         self.params = {}
         self.headers = {'User-Agent': 'PyPoeci'}
@@ -37,7 +39,7 @@ class Crawler(object):
         self.worker_count = worker_count
         self.name = name
 
-        self.start_workers(worker_count=worker_count, worker=self.parse, worker_args=[worker_callback])
+        self.start_workers(worker_count=worker_count, worker_args=[worker_callback])
 
     def __enter__(self):
         return self
@@ -50,17 +52,21 @@ class Crawler(object):
 
     def set_timeout(self, timeout):
         self.connection_timeout = timeout
+        return self
 
     def add_header(self, key, value):
         self.headers[key] = value
+        return self
 
     def add_param(self, key, value):
         if isinstance(value, list):
             key += '[]'
         self.params[key] = value
+        return self
 
     def set_selector(self, css_selector):
         self.css_selector = css_selector
+        return self
 
     def _abort(self):
         logging.debug('Received TERMINATE signal. Preparing shutdown.')
@@ -91,45 +97,43 @@ class Crawler(object):
             self.workers.clear()
         return True
 
-    def start_workers(self, worker_count: int, worker: callable, worker_args=None):
-        w = tuple(worker_args)
+    def start_workers(self, worker_count: int, worker_args=None):
         for i in range(worker_count):
             worker_name = 'Worker {}'.format(i)
             logging.debug('Starting worker [{}]'.format(worker_name))
-            t = threading.Thread(target=worker, args=w+(worker_name,), name=worker_name)
+            t = threading.Thread(target=self.parse, args=worker_args, name=worker_name)
             t.start()
             self.workers.append(t)
 
-    def parse(self, callback: callable, worker_name=''):
+    def parse(self, callback: callable):
+        worker_name = threading.current_thread().getName()
         while True:
             try:
-                logging.debug('{} waiting for work in queue'.format(worker_name))
-                link = self.queue.get()
-                logging.debug('{} got work from queue'.format(worker_name))
-                if link is None:
-                    logging.debug('{}: no more jobs - going home'.format(worker_name))
+                logging.debug('[{}]: waiting for work in queue'.format(worker_name))
+                data = self.queue.get()
+                if data is None:
+                    logging.debug('[{}]: no more jobs - going home'.format(worker_name))
                     break
-                logging.info('{}: Processing link'.format(worker_name))
-                if hasattr(link, 'href'):
-                    link_target = link.attrib['href']
-                else:
-                    link_target = link
-                logging.debug('{}'.format(link_target))
+                logging.info('[{}]: got work from queue'.format(worker_name))
+                match = data['match']
+                self._notify_match_found(match, data['source_url'])
                 if hasattr(callback, 'crawl'):
-                    callback.crawl(link_target)
+                    callback.crawl(match)
                 else:
-                    callback(link_target)
+                    callback(match)
             finally:
-                self.queue.task_done()
-        logging.debug('{}: bye'.format(worker_name))
+                if 'data' in locals():
+                    self.queue.task_done()
+        logging.debug('[{}]: bye'.format(worker_name))
 
     def crawl(self, url):
-        crawl_thread = threading.Thread(target=self._main_crawler, args=[url])
+        crawl_thread = threading.Thread(target=self._main_crawler, args=[url], name=self.name + ' - main crawl')
         crawl_thread.start()
         return crawl_thread
 
     def _main_crawler(self, url):
         logging.debug('{} started'.format(self.name))
+        self._notify_crawl_started(threading.current_thread())
         # do the crawl and
         # queue the extracted targets
         with self.lock:
@@ -145,11 +149,12 @@ class Crawler(object):
                 self._notify_progress()
                 html = response.text
                 tree = lhtml.fromstring(html)
-                links_to_follow = tree.cssselect(self.css_selector)
-                if len(links_to_follow) > 0 and len(self.workers) > 0:
-                    logging.info('Found {} links. Queueing for work'.format(len(links_to_follow)))
-                    for link in links_to_follow:
-                        self.queue.put(link)
+                tree.make_links_absolute(base_url=url)
+                matches = tree.cssselect(self.css_selector)
+                if len(matches) > 0 and len(self.workers) > 0:
+                    logging.info('Found {} links. Queueing for work'.format(len(matches)))
+                    for match in matches:
+                        self.queue.put({'source_url': response.url, 'match': match})
             except ReadTimeout as rt:
                 logging.info(
                     'Connection attempt to {} timed out after {} seconds.'.format(
@@ -166,26 +171,38 @@ class Crawler(object):
             finally:
                 self.queue.join()
         logging.debug('{} done'.format(self.name))
+        self._notify_finish()
+
+    def _notify_crawl_started(self, crawl_thread):
+        dispatcher.send(signal=self.SIGNAL_OUT_CRAWL_STARTED, sender=crawl_thread)
 
     def _notify_progress(self):
-        with self.lock:
-            dispatcher.send(signal=self.SIGNAL_PROGRESS, sender=self)
+        dispatcher.send(signal=self.SIGNAL_OUT_PROGRESS, sender=self)
+
+    def _notify_finish(self):
+        dispatcher.send(signal=self.SIGNAL_OUT_FINISHED, sender=self)
 
     def _notify_too_many_requests(self, requested_url):
-        with self.lock:
-            dispatcher.send(
-                sender=self,
-                signal=self.SIGNAL_TOO_MANY_REQUESTS,
-                url=requested_url,
-            )
+        dispatcher.send(
+            sender=self,
+            signal=self.SIGNAL_OUT_TOO_MANY_REQUESTS,
+            url=requested_url,
+        )
 
     def _notify_timeout(self, requested_url):
-        with self.lock:
-            dispatcher.send(
-                sender=self,
-                signal=self.SIGNAL_TIMEOUT,
-                url=requested_url,
-            )
+        dispatcher.send(
+            sender=self,
+            signal=self.SIGNAL_OUT_TIMEOUT,
+            url=requested_url,
+        )
+
+    def _notify_match_found(self, match, source_url):
+        dispatcher.send(
+            sender=self,
+            signal=self.SIGNAL_OUT_MATCH_FOUND,
+            match=match,
+            source_url=source_url,
+        )
 
 
 class TooManyRequestsError(ConnectionRefusedError):

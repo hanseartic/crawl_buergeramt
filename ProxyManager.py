@@ -71,3 +71,5 @@ class TorProxyManager(BaseProxyManager):
             )
         except ReadTimeout:
             logging.info('ip-address renewed.')
+        except ConnectionError:
+            self.renew_connection()
