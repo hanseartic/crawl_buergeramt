@@ -1,6 +1,6 @@
 import logging
 from queue import Queue, Empty
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse
 import requests
 import lxml.html as lhtml
 import threading
@@ -118,7 +118,11 @@ class Crawler(object):
                 match = data['match']
                 self._notify_match_found(match, data['source_url'])
                 if hasattr(callback, 'crawl'):
-                    callback.crawl(match)
+                    if isinstance(match, lhtml.HtmlElement):
+                        url = match.attrib.get('href')
+                    else:
+                        url = match
+                    callback.crawl(url)
                 else:
                     callback(match)
             finally:
