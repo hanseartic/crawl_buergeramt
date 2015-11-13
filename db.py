@@ -1,4 +1,4 @@
-from sqlite3 import Cursor
+from sqlite3 import Connection
 
 
 service_seed = [  # anliegen
@@ -24,8 +24,9 @@ location_seed = [  # dienstleister
 ]
 
 
-def seed(db: Cursor):
-    db.execute('''CREATE TABLE IF NOT EXISTS `customers` (
+def seed(sqlite_connection: Connection):
+    db_cursor = sqlite_connection.cursor()
+    db_cursor.execute('''CREATE TABLE IF NOT EXISTS `customers` (
     id int primary key,
     name text,
     phone text,
@@ -35,23 +36,21 @@ def seed(db: Cursor):
     appointment text,
     confirmation blob
 )''')
-    db.execute("SELECT `name` FROM 'sqlite_master' WHERE type='table' AND name='services'")
-    if not db.fetchone():
-        db.execute('''CREATE TABLE IF NOT EXISTS `services` (
+    db_cursor.execute("SELECT `name` FROM 'sqlite_master' WHERE type='table' AND name='services'")
+    if not db_cursor.fetchone():
+        db_cursor.execute('''CREATE TABLE IF NOT EXISTS `services` (
     id int(8) primary key,
     name text
 )''')
-        db.executemany("INSERT INTO `services` VALUES(?,?)", service_seed)
-    db.execute("SELECT `name` FROM 'sqlite_master' WHERE type='table' AND name='locations'")
-    if not db.fetchone():
-        db.execute('''CREATE TABLE IF NOT EXISTS `locations` (
+        db_cursor.executemany("INSERT INTO `services` VALUES(?,?)", service_seed)
+    db_cursor.execute("SELECT `name` FROM 'sqlite_master' WHERE type='table' AND name='locations'")
+    if not db_cursor.fetchone():
+        db_cursor.execute('''CREATE TABLE IF NOT EXISTS `locations` (
     id int(8) primary key,
     name text
 )''')
-        db.executemany("INSERT INTO `locations` VALUES(?,?)", location_seed)
-    db.connection.commit()
+        db_cursor.executemany("INSERT INTO `locations` VALUES(?,?)", location_seed)
+    db_cursor.connection.commit()
 
-    db.execute('select * from services limit 2')
-    v = db.fetchall()
-    d = db.description
+    db_cursor.close()
     pass

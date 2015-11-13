@@ -52,7 +52,6 @@ def get_date(start_date):
 
 pm = None
 sqlite_connection = sqlite3.connect('buergeramt.db')
-db_cursor = sqlite_connection.cursor()
 
 
 def main(args):
@@ -68,7 +67,7 @@ def main(args):
     #  don't show the TRACEs from stem in the logs
     logging.getLogger('stem').addFilter(lambda rec: rec.levelname.upper() != 'TRACE')
 
-    db.seed(db_cursor)
+    db.seed(sqlite_connection)
 
     logging.info('Start searching for free appointments')
     arguments = parse_args(args)
@@ -90,9 +89,9 @@ def main(args):
         .set_timeout(5) \
         .set_selector('#kundendaten form') \
         .add_header(
-        'User-Agent',
-        'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/46.0.2490.80 Safari/537.36'
-    )
+            'User-Agent',
+            'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/46.0.2490.80 Safari/537.36'
+        )
 
     details_crawler = Crawler(worker_count=8, name='Details Crawler', worker_callback=form_crawler)
     details_crawler.set_timeout(15)
@@ -169,6 +168,7 @@ def on_crawler_match(sender: Crawler, match, source_url):
     elif sender.name == 'Details crawler':
         pass
     elif sender.name == 'Form Filter':
+        db_cursor = sqlite_connection.cursor()
         db_cursor.execute(
             "SELECT id, name, phone, mail FROM `customers` where `appointment` = '' ORDER BY `updated` LIMIT 1"
         )
@@ -192,6 +192,7 @@ def on_crawler_match(sender: Crawler, match, source_url):
                     pass
             db_cursor.execute("UPDATE `customers` SET appointment=1, cancel_token=?, confirmation=?", (cancel_token, result))
             logging.debug('got appointment for {}'.format(customer[1]))
+            db_cursor.close()
         pass
 
 
