@@ -7,12 +7,14 @@ import lxml.html as lhtml
 import sqlite3
 import json_log_filter
 import db
-from Crawlers import Crawler
+from pypoeci import Crawler
 from ProxyManager import TorProxyManager
 from pydispatch import dispatcher
 
 CSS_CLASS_RESERVABLE = 'buchbar'
 CSS_CLASS_FREE_APPOINTMENT = 'frei'
+
+USER_DB = 'buergeramt.db'
 
 BASE_URL = u'https://service.berlin.de/terminvereinbarung/termin/'
 URL_CALENDAR = BASE_URL + u'tag.php'
@@ -51,7 +53,6 @@ def get_date(start_date):
 
 
 pm = None
-sqlite_connection = sqlite3.connect('buergeramt.db')
 
 
 def main(args):
@@ -67,7 +68,7 @@ def main(args):
     #  don't show the TRACEs from stem in the logs
     logging.getLogger('stem').addFilter(lambda rec: rec.levelname.upper() != 'TRACE')
 
-    db.seed(sqlite_connection)
+    db.seed(sqlite3.connect(USER_DB))
 
     logging.info('Start searching for free appointments')
     arguments = parse_args(args)
@@ -102,7 +103,7 @@ def main(args):
         'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/46.0.2490.80 Safari/537.36'
     )
 
-    # calendar_crawler = Crawler(worker_count=4, name='Calendar crawler', worker_callback=calendar_callback)
+    #  calendar_crawler = Crawler(worker_count=4, name='Calendar crawler', worker_callback=calendar_callback)
     calendar_crawler = Crawler(worker_count=4, name='Calendar crawler', worker_callback=details_crawler)
     calendar_crawler.add_header(
         'User-Agent',
@@ -168,7 +169,8 @@ def on_crawler_match(sender: Crawler, match, source_url):
     elif sender.name == 'Details crawler':
         pass
     elif sender.name == 'Form Filter':
-        db_cursor = sqlite_connection.cursor()
+        db_connection = sqlite3.connect(USER_DB)
+        db_cursor = db_connection.cursor()
         db_cursor.execute(
             "SELECT id, name, phone, mail FROM `customers` where `appointment` = '' ORDER BY `updated` LIMIT 1"
         )
@@ -190,9 +192,13 @@ def on_crawler_match(sender: Crawler, match, source_url):
                     cancel_token = cancel_tokens[0].text
                 except Exception:
                     pass
-            db_cursor.execute("UPDATE `customers` SET appointment=1, cancel_token=?, confirmation=?", (cancel_token, result))
+            db_cursor.execute(
+                "UPDATE `customers` SET appointment=1, cancel_token=?, confirmation=?",
+                (cancel_token, result)
+            )
             logging.debug('got appointment for {}'.format(customer[1]))
-            db_cursor.close()
+        db_cursor.close()
+        db_connection.close()
         pass
 
 

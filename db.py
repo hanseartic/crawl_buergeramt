@@ -53,4 +53,5 @@ def seed(sqlite_connection: Connection):
     db_cursor.connection.commit()
 
     db_cursor.close()
+    sqlite_connection.close()
     pass
