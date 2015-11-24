@@ -3,6 +3,9 @@ import sys
 import argparse
 import time
 import logging
+
+import datetime
+from lxml import etree
 import lxml.html as lhtml
 import sqlite3
 import json_log_filter
@@ -14,7 +17,7 @@ from pydispatch import dispatcher
 CSS_CLASS_RESERVABLE = 'buchbar'
 CSS_CLASS_FREE_APPOINTMENT = 'frei'
 
-USER_DB = 'buergeramt.db'
+USER_DB = '../buergeramt.db'
 
 BASE_URL = u'https://service.berlin.de/terminvereinbarung/termin/'
 URL_CALENDAR = BASE_URL + u'tag.php'
@@ -68,7 +71,7 @@ def main(args):
     #  don't show the TRACEs from stem in the logs
     logging.getLogger('stem').addFilter(lambda rec: rec.levelname.upper() != 'TRACE')
 
-    db.seed(sqlite3.connect(USER_DB))
+    #db.seed(sqlite3.connect(USER_DB))
 
     logging.info('Start searching for free appointments')
     arguments = parse_args(args)
@@ -119,9 +122,25 @@ def main(args):
     calendar_crawler.set_selector("td[class~='{}']>a".format(CSS_CLASS_RESERVABLE))
 
     while run:
-        ct = calendar_crawler.crawl(URL_CALENDAR)
-        ct.join()
-        time.sleep(20)
+        u = sqlite3.connect(USER_DB)
+        u.row_factory = sqlite3.Row
+        db_cursor = u.cursor()
+        try:
+            requested_services = []
+            res = db_cursor.execute("SELECT service_id from users_customers as u CROSS JOIN buergeramt_appointment as a on u.appointment_id=a.id group by service_id")
+            rows = res.fetchall()
+            for row in rows:
+                requested_services.append(row['service_id'])
+            calendar_crawler.add_param('anliegen', requested_services)
+            ct = calendar_crawler.crawl(URL_CALENDAR)
+            ct.join()
+        except Exception:
+            pass
+        finally:
+            db_cursor.close()
+            u.close()
+
+        time.sleep(5)
 
     for thread in crawl_threads:
         thread.join()
@@ -170,33 +189,53 @@ def on_crawler_match(sender: Crawler, match, source_url):
         pass
     elif sender.name == 'Form Filter':
         db_connection = sqlite3.connect(USER_DB)
+        db_connection.row_factory = sqlite3.Row
         db_cursor = db_connection.cursor()
-        db_cursor.execute(
-            "SELECT id, name, phone, mail FROM `customers` where `appointment` = '' ORDER BY `updated` LIMIT 1"
+        res = db_cursor.execute(
+            #"SELECT id, name, phone, mail FROM `customers` where `appointment` = '' ORDER BY `updated` LIMIT 1"
+            "SELECT c.id, c.name, c.phone, c.mail, a.id AS appointment_id, a.service_id FROM `users_customers` AS c " +
+            "CROSS JOIN `buergeramt_appointment` AS `a` on c.appointment_id=a.id " +
+            "WHERE `a`.`cancel_token` IS NULL LIMIT 1"
         )
-        customer = db_cursor.fetchone()
-        if customer:
+        row = res.fetchone()
+        if row:
             form = match
-            form.inputs['Nachname'].value = customer[1]   # Joern Kamphuis
-            form.inputs['EMail'].value = customer[3]      # 'joern@dingbone.com'
+            form.inputs['Nachname'].value = row['name']
+            form.inputs['EMail'].value = row['mail']
             if 'telefonnummer_fuer_rueckfragen' in form.inputs.keys():
-                form.inputs['telefonnummer_fuer_rueckfragen'].value = customer[2]  # '05948933496'
+                form.inputs['telefonnummer_fuer_rueckfragen'].value = row['phone']
             if 'telefon' in form.inputs.keys():
-                form.inputs['telefon'].value = customer[2]
+                form.inputs['telefon'].value = row['phone']
             form.inputs['agbgelesen'].checked = True
-            result = lhtml.parse(lhtml.submit_form(form)).getroot()
-            cancel_tokens = result.cssselect('.number-red-big')
-            cancel_token = 0
+            submit_result = lhtml.submit_form(form)
+            confirmation_page_tree = lhtml.parse(submit_result).getroot()
+            cancel_tokens = confirmation_page_tree.cssselect('.number-red-big')
+            result_file = 'confirm_' + str(row['appointment_id']) + '.html'
+            # save result for analysis
+            with open(result_file, 'w') as rf:
+                rf.write(etree.tostring(confirmation_page_tree))
             if len(cancel_tokens) > 0:
                 try:
+                    # parse date and time
+                    date = list(map(int, '10.12.2015'.split('.')))
                     cancel_token = cancel_tokens[0].text
-                except Exception:
+                    ""
+                    db_cursor.execute(
+                        "UPDATE `buergeramt_appointment` SET cancel_token=?, time=datetime(?) WHERE id=?",
+                        (
+                            cancel_token,
+                            datetime.datetime.isoformat(datetime.datetime(date, 12, 19, 8, 36, 0)),
+                            row['appointment_id']
+                        )
+                    )
+                    db.cursor.execute(
+                        "UPDATE `users_customer` SET confirmation_blob=?",
+                        (confirmation_page_tree,)
+                    )
+                    logging.debug('got appointment for {}'.format(row[1]))
+                except AttributeError:
                     pass
-            db_cursor.execute(
-                "UPDATE `customers` SET appointment=1, cancel_token=?, confirmation=?",
-                (cancel_token, result)
-            )
-            logging.debug('got appointment for {}'.format(customer[1]))
+
         db_cursor.close()
         db_connection.close()
         pass
