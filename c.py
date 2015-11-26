@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import sys
+import os
 import argparse
 import time
 import logging
+import atexit
 
 import datetime
 from lxml import etree
@@ -14,10 +16,12 @@ from pypoeci import Crawler
 from ProxyManager import TorProxyManager
 from pydispatch import dispatcher
 
+os.chdir(os.path.dirname(__file__))
+
 CSS_CLASS_RESERVABLE = 'buchbar'
 CSS_CLASS_FREE_APPOINTMENT = 'frei'
 
-USER_DB = '../buergeramt.db'
+USER_DB = os.getcwd() + '/../buergeramt.db'
 
 BASE_URL = u'https://service.berlin.de/terminvereinbarung/termin/'
 URL_CALENDAR = BASE_URL + u'tag.php'
@@ -62,7 +66,7 @@ def main(args):
     logging.basicConfig(
         format='{"time": "%(asctime)s", "level": "%(levelname)s", "source": "%(module)s", "message": %(message)s}',
         datefmt='%Y-%m-%d %H:%M:%S',
-        filename='buergeramt.log',
+        filename=os.getcwd() + '/buergeramt.log',
         level=logging.DEBUG
     )
 
@@ -210,27 +214,30 @@ def on_crawler_match(sender: Crawler, match, source_url):
             submit_result = lhtml.submit_form(form)
             confirmation_page_tree = lhtml.parse(submit_result).getroot()
             cancel_tokens = confirmation_page_tree.cssselect('.number-red-big')
-            result_file = 'confirm_' + str(row['appointment_id']) + '.html'
-            # save result for analysis
-            with open(result_file, 'w') as rf:
-                rf.write(etree.tostring(confirmation_page_tree))
             if len(cancel_tokens) > 0:
                 try:
+                    result_file = 'confirm_' + str(row['appointment_id']) + '.html'
+                    # save result for analysis
+                    with open(result_file, 'wb') as rf:
+                        rf.write(etree.tostring(confirmation_page_tree))
                     # parse date and time
                     date = list(map(int, '10.12.2015'.split('.')))
                     cancel_token = cancel_tokens[0].text
                     ""
                     db_cursor.execute(
-                        "UPDATE `buergeramt_appointment` SET cancel_token=?, time=datetime(?) WHERE id=?",
+                        "UPDATE `buergeramt_appointment` SET cancel_token=? WHERE id=?",
                         (
                             cancel_token,
-                            datetime.datetime.isoformat(datetime.datetime(date, 12, 19, 8, 36, 0)),
+                            #datetime.datetime.isoformat(datetime.datetime(date, 12, 19, 8, 36, 0)),
                             row['appointment_id']
                         )
                     )
-                    db.cursor.execute(
-                        "UPDATE `users_customer` SET confirmation_blob=?",
-                        (confirmation_page_tree,)
+                    db_cursor.execute(
+                        "UPDATE `users_customers` SET confirmation_blob=? WHERE users_customers.id=?",
+                        (
+                            etree.tostring(confirmation_page_tree.find('//*[@id="hhibody"]/div[3]')),
+                            row['id']
+                        )
                     )
                     logging.debug('got appointment for {}'.format(row[1]))
                 except AttributeError:
@@ -266,11 +273,21 @@ def wait_exit(signal):
     exit(signal)
 
 
+def set_exit_handler(func):
+    import signal
+    signal.signal(signal.SIGTERM, func)
+
+
 if __name__ == "__main__":
     try:
+        # clean up pid file
+        def _exit(sig, func=None):
+            os.remove(os.getcwd()+'/buergeramt_crawler.pid')
+        set_exit_handler(_exit)
         main(sys.argv[1:])
     except KeyboardInterrupt:
         run = False
         print(" caught. all abort")
         dispatcher.send(Crawler.SIGNAL_IN_TERMINATE)
         wait_exit(0)
+
